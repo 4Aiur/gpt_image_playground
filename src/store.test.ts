@@ -130,6 +130,7 @@ vi.mock('./lib/agentApi', () => ({
 import { clearAgentConversations, clearImages, clearTasks, getAllAgentConversations, getAllTasks, getImage, putAgentConversation, putImage, putTask as putDbTask } from './lib/db'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
+import { getExportBlobLimitError } from './lib/exportZip'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { cleanStaleAgentInputDrafts, clearFailedTasks, deleteAgentRoundFromConversation, deleteFavoriteCollection, editOutputs, getActiveAgentRounds, getAgentConversationTaskIds, getAgentRoundTaskIds, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, markInterruptedOpenAIRunningTasks, migratePersistedState, regenerateAgentAssistantMessage, remapAgentRoundMentionsForPathChange, removeTask, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
 
@@ -143,6 +144,15 @@ describe('error toast messages', () => {
 
   it('uses a generic message for long raw errors without a title', () => {
     expect(getErrorToastMessage(`invalid request ${'x'.repeat(90)}`)).toBe('操作失败，请查看详情')
+  })
+
+  it('preserves generic failure details for export failures', () => {
+    expect(getErrorToastMessage('导出失败：ZIP 文件生成失败')).toBe('导出失败：ZIP 文件生成失败')
+  })
+
+  it('detects export blobs that exceed the browser size limit', () => {
+    expect(getExportBlobLimitError(2_147_483_647)).toBeNull()
+    expect(getExportBlobLimitError(2_147_483_648)).toContain('2 GB')
   })
 })
 

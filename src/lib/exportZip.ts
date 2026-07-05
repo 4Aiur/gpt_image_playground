@@ -6,6 +6,9 @@ import { getNumberedFileNameBase, sanitizeFileNamePart } from './exportFileName'
 
 type ZipFiles = Record<string, Uint8Array | [Uint8Array, { mtime: Date }]>
 
+const MAX_EXPORT_BLOB_BYTES = 2_147_483_647
+const EXPORT_BLOB_CHUNK_BYTES = 512 * 1024 * 1024
+
 export interface BuildExportZipOptions {
   exportConfig?: boolean
   exportTasks?: boolean
@@ -26,6 +29,12 @@ export interface BuildExportZipParams {
 export interface ExportZipContents {
   manifest: ExportData
   files: Record<string, Uint8Array>
+}
+
+export interface ExportZipPart {
+  fileName: string
+  manifest: ExportData
+  bytes: Uint8Array
 }
 
 export function buildExportZip(params: BuildExportZipParams) {
@@ -89,6 +98,86 @@ export function buildExportZip(params: BuildExportZipParams) {
   return {
     manifest,
     bytes: zipSync(zipFiles, { level: 6 }),
+  }
+}
+
+export function getExportBlobLimitError(byteLength: number): string | null {
+  if (byteLength > MAX_EXPORT_BLOB_BYTES) {
+    return '当前备份文件超过浏览器支持的 2 GB 下载限制，请减少导出的图片或分批导出。'
+  }
+  return null
+}
+
+export function createExportBlob(bytes: Uint8Array): Blob {
+  const limitError = getExportBlobLimitError(bytes.byteLength)
+  if (limitError) throw new Error(limitError)
+
+  if (bytes.byteLength <= EXPORT_BLOB_CHUNK_BYTES) {
+    return new Blob([bytes], { type: 'application/zip' })
+  }
+
+  const parts: BlobPart[] = []
+  for (let offset = 0; offset < bytes.byteLength; offset += EXPORT_BLOB_CHUNK_BYTES) {
+    const chunk = bytes.subarray(offset, Math.min(offset + EXPORT_BLOB_CHUNK_BYTES, bytes.byteLength))
+    parts.push(chunk)
+  }
+
+  return new Blob(parts, { type: 'application/zip' })
+}
+
+export function buildExportZipParts(params: BuildExportZipParams, options: { maxBytes?: number } = {}) {
+  const maxBytes = options.maxBytes ?? MAX_EXPORT_BLOB_BYTES
+  if (!params.options.exportTasks || !params.tasks.length) {
+    const result = buildExportZip(params)
+    return [{ fileName: 'gpt-image-playground-backup.zip', manifest: result.manifest, bytes: result.bytes }]
+  }
+
+  const parts = splitExportZipTasks(params, maxBytes)
+  return parts.map((part, index) => ({
+    fileName: parts.length > 1 ? `gpt-image-playground-backup_part${String(index + 1).padStart(2, '0')}.zip` : 'gpt-image-playground-backup.zip',
+    manifest: part.manifest,
+    bytes: part.bytes,
+  }))
+}
+
+function splitExportZipTasks(params: BuildExportZipParams, maxBytes: number, tasks = params.tasks): ExportZipPart[] {
+  if (!tasks.length) return []
+  const taskImageIds = new Set<string>()
+  for (const task of tasks) addTaskReferencedImageIds(taskImageIds, task)
+  const images = params.images.filter((image) => taskImageIds.has(image.id))
+  const thumbnailsByImageId = new Map<string, NonNullable<Awaited<ReturnType<typeof getImageThumbnail>>>>()
+  for (const image of images) {
+    const thumbnail = params.thumbnailsByImageId.get(image.id)
+    if (thumbnail?.thumbnailDataUrl) thumbnailsByImageId.set(image.id, thumbnail)
+  }
+  const result = buildExportZip({
+    ...params,
+    tasks,
+    images,
+    thumbnailsByImageId,
+  })
+  if (result.bytes.byteLength <= maxBytes) {
+    return [{ fileName: '', manifest: result.manifest, bytes: result.bytes }]
+  }
+  if (tasks.length === 1) {
+    throw new Error('单个任务资源过大，无法继续拆分为更小的备份分包。请减少该任务中的图片后再试。')
+  }
+  const midpoint = Math.floor(tasks.length / 2)
+  return [
+    ...splitExportZipTasks(params, maxBytes, tasks.slice(0, midpoint)),
+    ...splitExportZipTasks(params, maxBytes, tasks.slice(midpoint)),
+  ]
+}
+
+function addTaskReferencedImageIds(taskImageIds: Set<string>, task: TaskRecord) {
+  for (const imageId of [
+    ...(task.inputImageIds || []),
+    ...(task.maskImageId ? [task.maskImageId] : []),
+    ...(task.outputImages || []),
+    ...(task.transparentOriginalImages || []),
+    ...(task.streamPartialImageIds || []),
+  ]) {
+    if (imageId) taskImageIds.add(imageId)
   }
 }
 

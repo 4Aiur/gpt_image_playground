@@ -54,7 +54,7 @@ import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompati
 import { createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
 import { formatExportFileTime } from './lib/exportFileName'
-import { buildExportZip, readExportZip, readExportZipFileAsDataUrl } from './lib/exportZip'
+import { buildExportZipParts, createExportBlob, readExportZip, readExportZipFileAsDataUrl } from './lib/exportZip'
 
 export const ALL_FAVORITES_COLLECTION_ID = '__all_favorites__'
 export const DEFAULT_FAVORITE_COLLECTION_ID = '__default_favorites__'
@@ -106,7 +106,10 @@ export function getErrorToastMessage(message: string): string {
   const separatorIndex = firstLine.search(/[：:]/)
   if (separatorIndex > 0) {
     const title = firstLine.slice(0, separatorIndex).trim()
-    if (isErrorToastTitle(title)) return title
+    const detail = firstLine.slice(separatorIndex + 1).trim()
+    const preserveDetailForGenericFailure = /^(?:导出|导入|保存|清空|创建|更新|加载).*失败$/.test(title)
+    if (isErrorToastTitle(title) && !preserveDetailForGenericFailure) return title
+    if (isErrorToastTitle(title) && preserveDetailForGenericFailure && detail) return firstLine
   }
 
   if (firstLine.length > ERROR_TOAST_MAX_LENGTH) return '操作失败，请查看详情'
@@ -1607,9 +1610,10 @@ export const useStore = create<AppState>()(
         const toastMessage = getToastMessage(message, type)
         const toast = { message: toastMessage, type }
         set({ toast })
+        const duration = type === 'error' ? 8000 : 3000
         setTimeout(() => {
           set((s) => (s.toast === toast ? { toast: null } : s))
-        }, 3000)
+        }, duration)
       },
 
       // Confirm
@@ -5432,7 +5436,7 @@ export async function exportData(options: ExportOptions = { exportConfig: true, 
       }
     }
 
-    const { bytes: zipped } = buildExportZip({
+    const exportParts = buildExportZipParts({
       options,
       exportedAt,
       settings,
@@ -5443,21 +5447,26 @@ export async function exportData(options: ExportOptions = { exportConfig: true, 
       defaultFavoriteCollectionId,
       agentConversations: getPersistableAgentConversations(agentConversations),
     })
-    const blob = new Blob([zipped.buffer as ArrayBuffer], { type: 'application/zip' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `gpt-image-playground-backup_${formatExportFileTime(new Date(exportedAt))}.zip`
-    a.click()
-    URL.revokeObjectURL(url)
-    useStore.getState().showToast('数据已导出', 'success')
+    for (const [index, part] of exportParts.entries()) {
+      const blob = createExportBlob(part.bytes)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${part.fileName || `gpt-image-playground-backup_${formatExportFileTime(new Date(exportedAt))}.zip`}`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      if (index < exportParts.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+    }
+    useStore.getState().showToast(exportParts.length > 1 ? `已分 ${exportParts.length} 批导出` : '数据已导出', 'success')
   } catch (e) {
-    useStore
-      .getState()
-      .showToast(
-        `导出失败：${e instanceof Error ? e.message : String(e)}`,
-        'error',
-      )
+    console.error('exportData failed', e)
+    const errorMessage = e instanceof Error ? e.message.trim() : String(e).trim()
+    const message = errorMessage ? `导出失败：${errorMessage}` : '导出失败：未知错误'
+    useStore.getState().showToast(message, 'error')
   }
 }
 
